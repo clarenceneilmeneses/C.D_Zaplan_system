@@ -1,35 +1,93 @@
 <?php
+require_once __DIR__ . '/includes/bootstrap.php';
+require_role('admin');
+
+if (is_post()) {
+  csrf_check();
+  $status = $_POST['status'] ?? '';
+  if (in_array($status, ['New', 'Replied', 'Archived'], true)) {
+    q('UPDATE inquiries SET status = ? WHERE id = ?', [$status, (int)($_POST['id'] ?? 0)]);
+    flash('success', 'Inquiry marked as ' . $status . '.');
+  }
+  redirect(url_with(['open' => null]));   // back to the same filters and page
+}
+
+$statuses = ['New', 'Replied', 'Archived'];
+$status = in_array($_GET['status'] ?? '', $statuses, true) ? $_GET['status'] : '';
+$search = search_term();
+$dayAgo = date('Y-m-d H:i:s', strtotime('-24 hours'));
+
+$from = 'FROM inquiries i LEFT JOIN equipment_types t ON t.id = i.type_id';
+$searchCond = like_any(['i.full_name', 'i.email', 'i.phone', 'i.item', 'i.inquiry_type', 'i.message'], $search);
+$rangeCond = date_where('i.created_at');
+[$w, $p] = where($searchCond, $rangeCond, $status ? ['i.status = ?', [$status]] : ['', []]);
+$listSql = "SELECT i.*, t.name AS equipment $from $w ORDER BY i.created_at DESC, i.id DESC";
+
+/** Row → the shape the detail drawer and CSV use */
+function inquiry_view(array $i, string $dayAgo): array {
+  return [
+    'id'       => (int)$i['id'],
+    'status'   => $i['status'],
+    'date'     => fdate($i['created_at'], 'M d, Y · g:i A'),
+    'name'     => $i['full_name'],
+    'email'    => $i['email'],
+    'phone'    => $i['phone'],
+    'item'     => $i['item'],
+    'type'     => $i['inquiry_type'],
+    'followup' => (int)($i['status'] === 'New' && $i['created_at'] < $dayAgo),   // still unanswered after 24 hours
+    'message'  => $i['message'],
+    'estimate' => $i['estimate_amount'] !== null ? [
+      'equipment' => $i['equipment'], 'days' => (int)$i['rental_days'], 'km' => (float)$i['distance_km'],
+      'total' => money($i['estimate_amount']),
+      'map' => 'https://www.openstreetmap.org/directions?route=' . setting('base_lat') . ',' . setting('base_lng') . ';' . $i['site_lat'] . ',' . $i['site_lng'],
+    ] : null,
+  ];
+}
+
+// CSV of everything matching the current filters (all pages)
+if (($_GET['export'] ?? '') === 'csv') {
+  $rows = array_map(function ($r) use ($dayAgo) {
+    $d = inquiry_view($r, $dayAgo);
+    return [$d['status'], $d['date'], $d['name'], $d['email'], $d['phone'], $d['item'], $d['type'], $d['estimate']['total'] ?? '', $d['message']];
+  }, q($listSql, $p)->fetchAll());
+  csv_download('inquiries.csv', ['Status', 'Date', 'Name', 'Email', 'Phone', 'Inquired About', 'Category', 'Estimate', 'Message'], $rows);
+}
+
+$list = paginate($listSql, $p);
+$inquiries = array_map(fn($r) => inquiry_view($r, $dayAgo), $list['rows']);
+
+// Stat cards follow the date range (not the search box)
+[$sw, $sp] = where($rangeCond);
+$stat = q("SELECT COUNT(*) AS total, SUM(status = 'New') AS new_cnt, SUM(status = 'New' AND created_at < ?) AS followup
+           FROM inquiries i $sw", array_merge([$dayAgo], $sp))->fetch();
+$rangeLabel = date_filter()['label'];
+$stats = [
+  ['Total Inquiries',   (int)$stat['total'],    $rangeLabel,                 'lucide:inbox'],
+  ['New / Unread',      (int)$stat['new_cnt'],  'Waiting for a first reply', 'lucide:mail'],
+  ['Pending Follow-up', (int)$stat['followup'], 'No reply after 24 hours',   'lucide:clock'],
+];
+
+// ?open=ID (from a notification or search result) opens that inquiry even if it's on another page
+$open = null;
+if ($openId = (int)($_GET['open'] ?? 0)) {
+  $row = q("SELECT i.*, t.name AS equipment $from WHERE i.id = ?", [$openId])->fetch();
+  $open = $row ? inquiry_view($row, $dayAgo) : null;
+}
+
 $pageTitle = 'Inquiry Management | C.D. Zaplan Trucking';
 $portal = 'admin'; $active = 'inquiries';
+$dateFilter = true;
 require_once __DIR__ . '/includes/portal-header.php';
-
-/* Sample inquiries. 'followup' = still waiting on a reply after 24 hours. */
-$inquiries = [
-  ['id'=>1,'status'=>'New',     'date'=>'Oct 29, 2026 · 9:14 AM', 'name'=>'Marco Santos',     'email'=>'marco.santos@example.com',     'phone'=>'09175550142', 'item'=>'Backhoe',                   'type'=>'Availability Check',      'followup'=>0, 'message'=>"Hi, do you have a backhoe available for site clearing in Urdaneta starting Nov 10? We'll need it for about two weeks. Please let me know the rate and whether mobilization is included."],
-  ['id'=>2,'status'=>'New',     'date'=>'Oct 28, 2026 · 4:40 PM', 'name'=>'Joanna Dela Cruz', 'email'=>'joanna.delacruz@example.com', 'phone'=>'09189990231', 'item'=>'10-Wheeler Dump Truck',   'type'=>'Quote & Pricing Request', 'followup'=>1, 'message'=>"Good afternoon. We're preparing a commercial lot in San Fabian and need two 10-wheeler dump trucks for a week. Could you send a quote including delivery fees?"],
-  ['id'=>3,'status'=>'Replied', 'date'=>'Oct 27, 2026 · 1:05 PM', 'name'=>'Ramon Villanueva', 'email'=>'ramon.v@example.com',            'phone'=>'09201234876', 'item'=>'Site Clearing & Excavation', 'type'=>'General Inquiry',   'followup'=>0, 'message'=>"We own a 2-hectare lot in Sta. Barbara that needs clearing before construction. How do you usually start a project like this?"],
-  ['id'=>4,'status'=>'New',     'date'=>'Oct 26, 2026 · 10:22 AM','name'=>'Kristine Lim',     'email'=>'kristine.lim@example.com',     'phone'=>'',            'item'=>'Backhoe',                   'type'=>'Technical Specifications','followup'=>1, 'message'=>"What is the bucket size and digging depth of your backhoe? Our drainage trench needs to be about 3 meters deep."],
-  ['id'=>5,'status'=>'Replied', 'date'=>'Oct 24, 2026 · 8:50 AM', 'name'=>'Paolo Reyes',      'email'=>'paolo.reyes@example.com',      'phone'=>'09175559981', 'item'=>'Site Clearing & Excavation', 'type'=>'Quote & Pricing Request','followup'=>0, 'message'=>"Looking for a quote on site clearing and foundation excavation for a 500 sqm commercial building in Dagupan."],
-  ['id'=>6,'status'=>'Archived','date'=>'Oct 18, 2026 · 3:12 PM', 'name'=>'Anna Mercado',     'email'=>'anna.mercado@example.com',     'phone'=>'09184443210', 'item'=>'10-Wheeler Dump Truck',   'type'=>'Availability Check',      'followup'=>0, 'message'=>"Is a dump truck available this coming weekend? We found another supplier, so please disregard."],
-];
-$total   = count($inquiries);
-$newCnt  = count(array_filter($inquiries, fn($i) => $i['status'] === 'New'));
-$pending = count(array_filter($inquiries, fn($i) => $i['status'] === 'New' && $i['followup']));
-$stats = [
-  ['statTotal',   'Total Inquiries',   $total,   'All time',                    'lucide:inbox'],
-  ['statNew',     'New / Unread',      $newCnt,  'Waiting for a first reply',   'lucide:mail'],
-  ['statPending', 'Pending Follow-up', $pending, 'No reply after 24 hours',     'lucide:clock'],
-];
 ?>
 <h1 class="page-title">Inquiry Management</h1>
-<p class="page-sub">Messages sent from the website inquiry form.</p>
+<p class="page-sub">Messages sent from the website inquiry form and the map estimator.</p>
 
 <div class="stat-grid">
-  <?php foreach ($stats as [$id,$label,$val,$sub,$icon]): ?>
+  <?php foreach ($stats as [$label,$val,$sub,$icon]): ?>
   <div class="stat-card">
     <div class="stat-card__head"><span><?= $label ?></span><iconify-icon icon="<?= $icon ?>" width="16" class="stat-card__icon"></iconify-icon></div>
-    <div id="<?= $id ?>" class="stat-card__value"><?= $val ?></div>
-    <div class="stat-card__sub"><?= $sub ?></div>
+    <div class="stat-card__value"><?= $val ?></div>
+    <div class="stat-card__sub"><?= e($sub) ?></div>
   </div>
   <?php endforeach; ?>
 </div>
@@ -37,16 +95,16 @@ $stats = [
 <section class="card card--spaced">
   <!-- Toolbar -->
   <div class="toolbar">
-    <div class="search search--grow">
-      <iconify-icon icon="lucide:search" width="16" class="search__icon"></iconify-icon>
-      <input id="inqSearch" oninput="applyFilters()" type="text" placeholder="Search name, email, or item..." class="search__input">
-    </div>
-    <select id="inqStatus" onchange="applyFilters()" class="select">
-      <option value="All">Status: All</option><option>New</option><option>Replied</option><option>Archived</option>
+    <?= list_search('Search name, email, item or message…') ?>
+    <select onchange="location.href = this.value" class="select" aria-label="Status">
+      <option value="<?= e(url_with(['status' => null, 'page' => null])) ?>">Status: All</option>
+      <?php foreach ($statuses as $s): ?>
+      <option value="<?= e(url_with(['status' => $s, 'page' => null])) ?>" <?= $status === $s ? 'selected' : '' ?>><?= $s ?></option>
+      <?php endforeach; ?>
     </select>
-    <button onclick="exportCsv()" class="btn btn--outline">
+    <a href="<?= e(url_with(['export' => 'csv', 'page' => null])) ?>" class="btn btn--outline">
       <iconify-icon icon="lucide:download" width="16"></iconify-icon> Export CSV
-    </button>
+    </a>
   </div>
 
   <!-- Table -->
@@ -55,26 +113,26 @@ $stats = [
       <thead>
         <tr><th>Status</th><th>Date Submitted</th><th>Customer</th><th>Inquired About</th><th>Category</th><th>Action</th></tr>
       </thead>
-      <tbody id="inqRows">
+      <tbody>
         <?php foreach ($inquiries as $i): ?>
-        <tr data-status="<?= e($i['status']) ?>" data-followup="<?= $i['followup'] ?>"
-            data-search="<?= e(strtolower($i['name'].' '.$i['email'].' '.$i['item'].' '.$i['type'])) ?>"
-            data-inquiry="<?= e(json_encode($i)) ?>">
-          <td class="status-cell"><?= pill($i['status']) ?></td>
+        <tr>
+          <td><?= pill($i['status']) ?></td>
           <td class="td-muted td-nowrap"><?= e($i['date']) ?></td>
           <td><div class="person">
-            <span class="avatar"><?= initials($i['name']) ?></span>
+            <span class="avatar"><?= e(initials($i['name'])) ?></span>
             <div><div class="cell-title"><?= e($i['name']) ?></div><div class="cell-meta"><?= e($i['email']) ?></div></div></div></td>
-          <td><?= e($i['item']) ?></td>
+          <td><?= e($i['item']) ?><?php if ($i['estimate']): ?><div class="cell-meta"><iconify-icon icon="lucide:map-pin" width="11"></iconify-icon> Estimate <?= e($i['estimate']['total']) ?></div><?php endif; ?></td>
           <td class="td-muted"><?= e($i['type']) ?></td>
-          <td><button onclick="openDrawer(this.closest('tr'))" class="btn btn--line btn--sm">View Details</button></td>
+          <td><button type="button" data-inquiry="<?= e(json_encode($i)) ?>" onclick="openDrawer(JSON.parse(this.dataset.inquiry))" class="btn btn--line btn--sm">View Details</button></td>
         </tr>
         <?php endforeach; ?>
+        <?php if (!$inquiries): ?>
+        <tr><td colspan="6" class="empty"><?= ($search !== '' || $status || date_filter()['from']) ? 'No inquiries match your filters.' : 'No inquiries yet.' ?></td></tr>
+        <?php endif; ?>
       </tbody>
     </table>
-    <div id="inqEmpty" class="empty hidden">No inquiries match your search.</div>
   </div>
-  <div class="card__foot">Showing <span id="inqShown"><?= $total ?></span> of <?= $total ?> inquiries</div>
+  <?= pagination($list, 'inquiries') ?>
 </section>
 
 <!-- Detail drawer -->
@@ -110,90 +168,64 @@ $stats = [
         </dl>
       </div>
 
+      <div id="dEstimateBox" class="hidden">
+        <div class="eyebrow eyebrow--muted drawer__label">Website estimate</div>
+        <dl class="detail-list">
+          <div class="detail"><dt>Unit</dt><dd id="dEstUnit"></dd></div>
+          <div class="detail"><dt>Distance</dt><dd><a id="dEstMap" target="_blank" rel="noopener" class="detail__link"></a></dd></div>
+          <div class="detail"><dt>Total</dt><dd id="dEstTotal" class="strong"></dd></div>
+        </dl>
+      </div>
+
       <div>
         <div class="eyebrow eyebrow--muted drawer__label">Message</div>
         <p id="dMessage" class="drawer__message"></p>
       </div>
     </div>
 
-    <div class="drawer__foot">
+    <form method="post" class="drawer__foot">
+      <?= csrf_field() ?><input type="hidden" name="id" id="dId">
       <a id="dReply" href="#" class="btn btn--amber"><iconify-icon icon="lucide:reply" width="16"></iconify-icon> Reply via Email</a>
-      <button onclick="setStatus('Replied')" class="btn btn--outline">Mark as Replied</button>
-      <button onclick="setStatus('Archived')" class="btn btn--ghost">Archive</button>
-    </div>
+      <button name="status" value="Replied" class="btn btn--outline">Mark as Replied</button>
+      <button name="status" value="Archived" class="btn btn--ghost">Archive</button>
+      <button name="status" value="New" id="dReopen" class="btn btn--ghost">Mark as New</button>
+    </form>
   </aside>
 </div>
 
 <script>
-const rows = [...document.querySelectorAll('#inqRows tr')];
-let current = null;
-
-// Status badge (same markup as pill() in includes/mock-data.php)
+// Status badge (same markup as pill() in includes/bootstrap.php)
 const TONE = { New: 'green', Replied: 'blue', Archived: 'slate' };
 const badge = s => `<span class="pill pill--${TONE[s]}"><span class="pill__dot">●</span>${s}</span>`;
 
-function applyFilters() {
-  const q = document.getElementById('inqSearch').value.trim().toLowerCase();
-  const st = document.getElementById('inqStatus').value;
-  let shown = 0;
-  rows.forEach(r => {
-    const ok = (st === 'All' || r.dataset.status === st) && r.dataset.search.includes(q);
-    r.classList.toggle('hidden', !ok);
-    if (ok) shown++;
-  });
-  document.getElementById('inqShown').textContent = shown;
-  document.getElementById('inqEmpty').classList.toggle('hidden', shown > 0);
-}
-
-function updateStats() {
-  document.getElementById('statTotal').textContent   = rows.length;
-  document.getElementById('statNew').textContent     = rows.filter(r => r.dataset.status === 'New').length;
-  document.getElementById('statPending').textContent = rows.filter(r => r.dataset.status === 'New' && r.dataset.followup === '1').length;
-}
-
-function openDrawer(row) {
-  current = row;
-  const d = JSON.parse(row.dataset.inquiry);
-  document.getElementById('dStatus').innerHTML = badge(row.dataset.status);
-  document.getElementById('dDate').textContent = d.date;
-  document.getElementById('dInitials').textContent = d.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
-  document.getElementById('dName').textContent = d.name;
-  document.getElementById('dEmail').textContent = d.email;
-  document.getElementById('dPhone').textContent = d.phone || '—';
-  document.getElementById('dItem').textContent = d.item;
-  document.getElementById('dType').textContent = d.type;
-  document.getElementById('dMessage').textContent = d.message;
-  document.getElementById('dReply').href = 'mailto:' + d.email + '?subject=' + encodeURIComponent('Re: ' + d.item + ' (' + d.type + ')');
-  document.getElementById('inquiryDrawer').classList.add('is-open');
+function openDrawer(d) {
+  const $ = id => document.getElementById(id);
+  $('dId').value = d.id;
+  $('dStatus').innerHTML = badge(d.status);
+  $('dDate').textContent = d.date;
+  $('dInitials').textContent = d.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  $('dName').textContent = d.name;
+  $('dEmail').textContent = d.email;
+  $('dPhone').textContent = d.phone || '—';
+  $('dItem').textContent = d.item;
+  $('dType').textContent = d.type;
+  $('dMessage').textContent = d.message;
+  $('dReopen').classList.toggle('hidden', d.status === 'New');
+  $('dEstimateBox').classList.toggle('hidden', !d.estimate);
+  if (d.estimate) {
+    $('dEstUnit').textContent = `${d.estimate.equipment} · ${d.estimate.days} day(s)`;
+    $('dEstMap').textContent = `${d.estimate.km.toFixed(1)} km · open route map`;
+    $('dEstMap').href = d.estimate.map;
+    $('dEstTotal').textContent = d.estimate.total;
+  }
+  $('dReply').href = 'mailto:' + d.email + '?subject=' + encodeURIComponent('Re: ' + d.item + ' (' + d.type + ')');
+  $('inquiryDrawer').classList.add('is-open');
   document.body.style.overflow = 'hidden';
 }
 function closeDrawer() {
   document.getElementById('inquiryDrawer').classList.remove('is-open');
   document.body.style.overflow = '';
 }
-
-// UI-only: updates the row on screen. Save to the database here later.
-function setStatus(s) {
-  if (!current) return;
-  current.dataset.status = s;
-  if (s !== 'New') current.dataset.followup = '0';
-  current.querySelector('.status-cell').innerHTML = badge(s);
-  document.getElementById('dStatus').innerHTML = badge(s);
-  updateStats(); applyFilters();
-}
-
-// Exports the rows currently visible in the table
-function exportCsv() {
-  const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-  const lines = [['Status','Date','Name','Email','Phone','Inquired About','Category','Message'].map(esc).join(',')];
-  rows.filter(r => !r.classList.contains('hidden')).forEach(r => {
-    const d = JSON.parse(r.dataset.inquiry);
-    lines.push([r.dataset.status, d.date, d.name, d.email, d.phone, d.item, d.type, d.message].map(esc).join(','));
-  });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([lines.join('\n')], {type: 'text/csv'}));
-  a.download = 'inquiries.csv';
-  a.click();
-}
+<?php if ($open): ?>document.addEventListener('DOMContentLoaded', () => openDrawer(<?= js($open) ?>));<?php endif; ?>
 </script>
 <?php require_once __DIR__ . '/includes/portal-footer.php'; ?>

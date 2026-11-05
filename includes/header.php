@@ -4,20 +4,30 @@
  * Set these BEFORE including:
  *   $pageTitle        string
  *   $hidePublicHeader true on login / register / admin / dashboard
- *   $isLoggedIn       true to show the "REGISTER + LOGOUT" nav from the Figma
+ *   $useMap           true on pages that show the Leaflet map (landing page, client dashboard)
  */
+require_once __DIR__ . '/bootstrap.php';
 $pageTitle        = $pageTitle        ?? 'C.D. Zaplan Trucking';
 $hidePublicHeader = $hidePublicHeader ?? false;
-$isLoggedIn       = $isLoggedIn       ?? false;
+$useMap           = $useMap           ?? false;
+$me               = current_user();
+$portalHome       = ($me && $me['role'] === 'admin') ? 'admin.php' : 'dashboard.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title><?= htmlspecialchars($pageTitle) ?></title>
+  <meta name="csrf-token" content="<?= csrf_token() ?>">
+  <title><?= e($pageTitle) ?></title>
 
   <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+  <?php if ($useMap): ?>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <?php endif; ?>
   <link rel="icon" href="assets/img/logo.png">
   <link rel="stylesheet" href="assets/css/style.css">
 </head>
@@ -33,15 +43,15 @@ $isLoggedIn       = $isLoggedIn       ?? false;
 
     <nav class="site-nav">
       <a href="index.php#about">Services</a>
+      <a href="index.php#estimate">Estimate</a>
       <a href="index.php#projects">Projects</a>
-      <a href="index.php#about">About Us</a>
       <a href="#contact">Contact</a>
     </nav>
 
     <div class="site-header__actions">
-      <?php if ($isLoggedIn): ?>
-        <a href="register.php" class="btn btn--amber btn--nav">Register</a>
-        <a href="login.php" class="btn btn--outline btn--nav">Logout</a>
+      <?php if ($me): ?>
+        <a href="<?= $portalHome ?>" class="btn btn--amber btn--nav">My Portal</a>
+        <a href="logout.php" class="btn btn--outline btn--nav">Logout</a>
       <?php else: ?>
         <a href="login.php" class="btn btn--outline btn--nav">Log In</a>
         <a href="register.php" class="btn btn--amber btn--nav">Register</a>
@@ -57,13 +67,18 @@ $isLoggedIn       = $isLoggedIn       ?? false;
   <div id="mobileMenu" class="mobile-menu hidden">
     <div class="mobile-menu__links">
       <a href="index.php#about">Services</a>
+      <a href="index.php#estimate">Estimate</a>
       <a href="index.php#projects">Projects</a>
-      <a href="index.php#about">About Us</a>
       <a href="#contact">Contact</a>
     </div>
     <div class="mobile-menu__actions">
-      <a href="login.php" class="btn btn--outline btn--nav btn--nav-block">Log In</a>
-      <a href="register.php" class="btn btn--amber btn--nav btn--nav-block">Register</a>
+      <?php if ($me): ?>
+        <a href="<?= $portalHome ?>" class="btn btn--amber btn--nav btn--nav-block">My Portal</a>
+        <a href="logout.php" class="btn btn--outline btn--nav btn--nav-block">Logout</a>
+      <?php else: ?>
+        <a href="login.php" class="btn btn--outline btn--nav btn--nav-block">Log In</a>
+        <a href="register.php" class="btn btn--amber btn--nav btn--nav-block">Register</a>
+      <?php endif; ?>
     </div>
   </div>
 </header>

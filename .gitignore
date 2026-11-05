@@ -1,0 +1,3 @@
+# Uploaded valid IDs (personal data) must never be committed
+uploads/ids/*
+!uploads/ids/.gitkeep
